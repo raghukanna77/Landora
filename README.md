@@ -6,6 +6,10 @@ From reactive monitoring to proactive land-governance intelligence.
 
 **DEMO DATA — SYNTHETIC / CALIBRATED** — All data is synthetic, not official government records. AI-assisted decision support — predicted risk — human-in-the-loop — prototype.
 
+**Deploy to Render:** See [`RENDER_DEPLOY.md`](./RENDER_DEPLOY.md) and [`render.yaml`](./render.yaml) — Blueprint `bhoomi-db` + `bhoomi-api` + `bhoomi-frontend` — one-click deploy.
+
+**Live after Render:** Frontend `https://bhoomi-frontend.onrender.com` + API `https://bhoomi-api.onrender.com/health`
+
 ## Architecture
 Existing systems (Bhoomi Rashi, PM GatiShakti, DILRMP, NHAI, State Revenue) → Digital records → **BHOOMI-DRISHTI Predictive Intelligence Layer** → Officer Action
 

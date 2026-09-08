@@ -1,9 +1,12 @@
-const BASE = ''
+// Render: set VITE_API_URL to backend URL e.g., https://bhoomi-api.onrender.com
+// Fallback '' uses same origin (works if backend serves frontend or proxy)
+const BASE = (import.meta as any).env?.VITE_API_URL || ''
 function authHeader(){ const t=localStorage.getItem('token'); return t? {Authorization:`Bearer ${t}`}: {} as any }
 async function req(path:string, opts:any={}){
-  const res=await fetch(`${BASE}${path}`, { ...opts, headers:{'Content-Type':'application/json', ...authHeader(), ...(opts.headers||{})}})
+  const url = `${BASE}${path}`
+  const res=await fetch(url, { ...opts, headers:{'Content-Type':'application/json', ...authHeader(), ...(opts.headers||{})}})
   const j=await res.json().catch(()=>({}))
-  if(!res.ok) throw new Error(j.detail || j.error?.message || 'Request failed')
+  if(!res.ok) throw new Error(j.detail || j.error?.message || JSON.stringify(j) || 'Request failed')
   return j
 }
 export const api={
@@ -35,8 +38,15 @@ export const api={
   train:()=> req('/api/model/train',{method:'POST'}),
   approve:()=> req('/api/model/approve',{method:'POST'}),
   voice:(project_id:number,language:string)=> req('/api/voice/briefing',{method:'POST', body:JSON.stringify({project_id,language})}),
+  voiceQuery:(query:string,language:string='en-IN')=> req('/api/voice/query',{method:'POST', body:JSON.stringify({query,language})}),
   notifications:()=> req('/api/notifications'),
-  submitComplaint:(data:any)=> fetch('/api/complaints/public',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json()),
-  trackComplaint:(id:string)=> fetch(`/api/complaints/track/${id}`).then(r=>r.json()),
+  submitComplaint:(data:any)=> {
+    const url = `${BASE}/api/complaints/public`
+    return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json())
+  },
+  trackComplaint:(id:string)=> {
+    const url = `${BASE}/api/complaints/track/${id}`
+    return fetch(url).then(r=>r.json())
+  },
   listComplaints:()=> req('/api/complaints'),
 }

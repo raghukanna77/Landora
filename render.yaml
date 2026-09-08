@@ -1,0 +1,55 @@
+# Render Blueprint for BHOOMI-DRISHTI
+# Deploy: Dashboard -> New -> Blueprint -> Connect https://github.com/raghukanna77/Landora -> Apply
+# Docs: https://render.com/docs/blueprint-spec
+# After deploy, set VITE_API_URL and CORS_ORIGINS to actual Render URLs (see procedure below)
+
+databases:
+  - name: bhoomi-db
+    plan: free
+    databaseName: bhoomi
+    user: bhoomi
+
+services:
+  - type: web
+    name: bhoomi-api
+    env: python
+    region: singapore
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bhoomi-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://bhoomi-frontend.onrender.com,http://localhost:5173
+      - key: FRONTEND_URL
+        value: https://bhoomi-frontend.onrender.com
+      - key: DEMO_MODE
+        value: true
+      - key: BHASHINI_API_KEY
+        sync: false
+
+  - type: web
+    name: bhoomi-frontend
+    env: static
+    region: singapore
+    plan: free
+    rootDir: frontend
+    buildCommand: npm ci && VITE_API_URL=https://bhoomi-api.onrender.com npm run build
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://bhoomi-api.onrender.com

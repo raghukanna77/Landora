@@ -7,9 +7,10 @@ venv/
 .env
 bhoomi.db
 *.db
-ml/artifacts/*.joblib
-ml/artifacts/*.pkl
-ml/artifacts/*.json
+# Keep demo model for Render fast cold start (commit artifacts)
+# ml/artifacts/*.joblib
+# ml/artifacts/*.pkl
+# ml/artifacts/*.json
 node_modules/
 dist/
 .DS_Store
