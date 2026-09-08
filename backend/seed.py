@@ -84,12 +84,29 @@ def seed():
         db.add(p)
     db.commit()
     # predictions + explanations + grievances + notifications + model_run
+    # Fallback if ML libs missing (e.g., libgomp.so.1 on Render python env)
+    def safe_predict(proj):
+        try:
+            return predict_for_project(proj)
+        except Exception as e:
+            print(f"predict fallback for {proj.project_code}: {e}")
+            # heuristic fallback
+            prob = 0.3 + (proj.grievances/80) + (proj.compensation_pending_pct/400) + (proj.legal_disputes/30)
+            prob = max(0.05, min(0.95, prob))
+            lvl = "HIGH" if prob>=0.70 else "MEDIUM" if prob>=0.40 else "LOW"
+            return {"probability": prob, "risk_level": lvl, "model_version": "heuristic-v1"}
+    def safe_explain(proj):
+        try:
+            return explain_project(proj)
+        except Exception as e:
+            print(f"explain fallback: {e}")
+            return [{"feature":"grievances","contribution":0.2,"direction":"increases risk","human_explanation":"High grievance volume is increasing the predicted delay risk."}]
     for p in db.query(Project).all():
-        res=predict_for_project(p)
+        res=safe_predict(p)
         rp=RiskPrediction(project_id=p.id, stage=p.current_stage, probability=res["probability"], risk_level=res["risk_level"], model_version=res["model_version"])
         db.add(rp)
         db.commit(); db.refresh(rp)
-        exps=explain_project(p)
+        exps=safe_explain(p)
         for e in exps:
             db.add(ShapExplanation(prediction_id=rp.id, feature=e["feature"], contribution=e["contribution"], direction=e["direction"], human_explanation=e["human_explanation"]))
         # sample grievances for high risk projects

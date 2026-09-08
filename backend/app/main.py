@@ -25,16 +25,15 @@ async def lifespan(app: FastAPI):
         cnt = db.query(User).count()
         if cnt == 0:
             print("No users found, seeding demo data...")
-            # Import seed logic without re-creating engine
-            from .ml.train import train as train_model
+            # Ensure artifacts exist (don't fail if libgomp missing — we have fallback heuristic)
             import os as _os
-            # Ensure artifacts exist
             if not _os.path.exists("./ml/artifacts/model.joblib"):
                 try:
+                    from .ml.train import train as train_model
                     train_model()
                     print("Model trained")
                 except Exception as e:
-                    print(f"Model train failed: {e}")
+                    print(f"Model train failed (fallback will be used): {e}")
             # Seed
             try:
                 from seed import seed as run_seed
