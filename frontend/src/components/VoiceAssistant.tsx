@@ -1,135 +1,164 @@
 import { useState, useRef, useEffect } from 'react'
-import { Mic, MicOff, Volume2, X, Sparkles, Activity, AlertCircle } from 'lucide-react'
+import { Mic, MicOff, Volume2, X, Pause, Play, RotateCcw } from 'lucide-react'
 import { useNavigate, useLocation } from 'react-router-dom'
 
-type VoiceResp = { intent:string, response:string, navigation?:string, route?:string, filters?:any, data?:any, action?:string, voice_profile?:any }
+type VoiceResp = { intent:string, response:string, route?:string, filters?:any, data?:any, speak?:boolean }
+type VState = 'IDLE'|'LISTENING'|'PROCESSING'|'SPEAKING'|'ERROR'
 
-type State = 'IDLE'|'LISTENING'|'PROCESSING'|'SPEAKING'|'ERROR'
+const SUGGESTIONS = [
+  "Show critical projects",
+  "Why is this project high risk?",
+  "What are today's alerts?",
+  "Show grievance hotspots",
+  "Give me a project briefing",
+  "What actions do you recommend?",
+  "Open Risk Intelligence",
+  "Open the What-If Simulator",
+]
 
-function selectDeepVoice(): SpeechSynthesisVoice | null {
-  const voices = speechSynthesis.getVoices()
-  if(!voices.length) return null
-  // Prefer deep male English voices
-  const prefs = [
-    (v:SpeechSynthesisVoice)=> /Guy|Male|David|James|George|Alex/i.test(v.name) && /en/i.test(v.lang),
-    (v:SpeechSynthesisVoice)=> /en-IN/i.test(v.lang) && /Male|Guy/i.test(v.name),
-    (v:SpeechSynthesisVoice)=> /en-GB.*Male/i.test(v.name),
-    (v:SpeechSynthesisVoice)=> /en/i.test(v.lang),
-  ]
-  for(const fn of prefs){
-    const f=voices.find(fn)
-    if(f) return f
-  }
-  return voices[0]
-}
-
-function Waveform({ active, mode }:{active:boolean, mode:State}){
-  const canvasRef=useRef<HTMLCanvasElement>(null)
-  const animRef=useRef<number>(0)
-  useEffect(()=>{
-    const canvas=canvasRef.current
-    if(!canvas) return
-    const ctx=canvas.getContext('2d')!
-    let t=0
-    const draw=()=>{
-      t+=0.14
-      ctx.clearRect(0,0,canvas.width,canvas.height)
-      const bars=18
-      const w=canvas.width/bars
-      for(let i=0;i<bars;i++){
-        let h=4
-        if(mode==='LISTENING' && active){
-          h= 6 + Math.abs(Math.sin(t + i*0.55))*22 + Math.random()*6
-        } else if(mode==='PROCESSING'){
-          h= 10 + Math.abs(Math.sin(t*0.6 + i*0.35))*10
-        } else if(mode==='SPEAKING' && active){
-          h= 8 + Math.abs(Math.sin(t*0.9 + i*0.7))*18
-        } else {
-          h= 4 + Math.abs(Math.sin(t*0.2 + i*0.4))*3
-        }
-        const x=i*w + w*0.18
-        const y=(canvas.height - h)/2
-        ctx.fillStyle= mode==='LISTENING' ? '#ff6b35' : mode==='SPEAKING' ? '#38bdf8' : mode==='PROCESSING' ? '#f59e0b' : '#334155'
-        // rounded bar
-        ctx.beginPath()
-        const r=3
-        // @ts-ignore
-        if(ctx.roundRect) ctx.roundRect(x, y, w*0.64, h, r)
-        else ctx.fillRect(x,y,w*0.64,h)
-        if((ctx as any).roundRect) ctx.fill()
-        else ctx.fill()
-      }
-      animRef.current=requestAnimationFrame(draw)
-    }
-    draw()
-    return ()=> cancelAnimationFrame(animRef.current)
-  },[active, mode])
-  return <canvas ref={canvasRef} width={220} height={36} style={{width:220,height:36}}/>
+function Waveform({ state, volume }: { state: VState, volume: number }){
+  const bars = 24
+  // volume 0-1 affects bar height when listening/speaking
+  return <div style={{display:'flex',gap:3,alignItems:'center',justifyContent:'center',height:28}}>
+    {Array.from({length: bars}).map((_,i)=>{
+      const base = state==='LISTENING' ? 6 + volume*22 + Math.sin(Date.now()/180 + i)*4
+                 : state==='SPEAKING' ? 8 + Math.abs(Math.sin(Date.now()/140 + i*0.6))*18
+                 : state==='PROCESSING' ? 6 + Math.abs(Math.sin(Date.now()/300 + i))*10
+                 : 4
+      const h = Math.max(4, Math.min(24, base + (i%3)*2))
+      return <div key={i} style={{width:3,height:h,borderRadius:999,background: state==='LISTENING' ? '#ff6b35' : state==='SPEAKING' ? '#0a1930' : state==='PROCESSING' ? '#64748b' : '#cbd5e1', transition:'height 0.08s', opacity: state==='IDLE' ? 0.6 : 1}}/>
+    })}
+  </div>
 }
 
 export default function VoiceAssistant({ inline=false }:{inline?:boolean}){
   const [open,setOpen]=useState(false)
-  const [state,setState]=useState<State>('IDLE')
+  const [state,setState]=useState<VState>('IDLE')
   const [transcript,setTranscript]=useState("")
+  const [interim,setInterim]=useState("")
   const [response,setResponse]=useState<VoiceResp|null>(null)
+  const [volume,setVolume]=useState(0.2)
   const [error,setError]=useState("")
   const nav=useNavigate()
   const loc=useLocation()
   const recRef=useRef<any>(null)
-  const audioCtxRef=useRef<AudioContext|null>(null)
+  const audioContextRef=useRef<AudioContext|null>(null)
+  const analyserRef=useRef<AnalyserNode|null>(null)
 
-  // preload voices
-  useEffect(()=>{ speechSynthesis.getVoices(); },[])
+  // Extract project_id from current route for context awareness
+  const projectIdFromRoute = ()=>{
+    const m = loc.pathname.match(/\/projects\/(\d+)/)
+    return m ? m[1] : null
+  }
 
-  const currentProjectId=(()=>{
-    const m=loc.pathname.match(/\/projects\/(\d+)/)
-    return m? parseInt(m[1]): null
-  })()
+  // Voice selection for deep male commanding presence
+  const selectDeepVoice = ()=>{
+    const voices = speechSynthesis.getVoices()
+    // Prefer en-IN male, then en-US male low pitch
+    const preferred = voices.find(v=> v.lang==='en-IN' && /male/i.test(v.name)) ||
+                      voices.find(v=> v.lang.startsWith('en') && /male/i.test(v.name)) ||
+                      voices.find(v=> v.name.toLowerCase().includes('google uk english male')) ||
+                      voices.find(v=> v.name.toLowerCase().includes('aaron')) ||
+                      voices.find(v=> v.lang==='en-IN') ||
+                      voices.find(v=> v.lang.startsWith('en')) ||
+                      voices[0]
+    return preferred || null
+  }
+  useEffect(()=>{
+    // preload voices
+    speechSynthesis.getVoices()
+    const h = ()=> speechSynthesis.getVoices()
+    speechSynthesis.onvoiceschanged = h
+    return ()=> { speechSynthesis.onvoiceschanged = null }
+  },[])
 
-  const startListening=()=>{
-    // barge-in: if speaking, stop
-    if(state==='SPEAKING'){
-      speechSynthesis.cancel()
-      setState('IDLE')
+  // Poll volume for waveform when listening
+  useEffect(()=>{
+    if(state!=='LISTENING' || !analyserRef.current) return
+    let raf:number
+    const tick=()=>{
+      if(analyserRef.current){
+        const data = new Uint8Array(analyserRef.current.frequencyBinCount)
+        analyserRef.current.getByteFrequencyData(data)
+        const avg = data.reduce((a,b)=>a+b,0)/data.length / 255
+        setVolume(avg)
+      }
+      raf=requestAnimationFrame(tick)
     }
+    tick()
+    return ()=> cancelAnimationFrame(raf)
+  },[state])
+
+  const startListening=async()=>{
+    setError("")
+    // barge-in: stop speaking
+    speechSynthesis.cancel()
+    if(state==='SPEAKING') setState('IDLE')
+
     const SR = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
     if(!SR){
-      setError("SpeechRecognition not supported — use Chrome. Type below.")
+      setError("SpeechRecognition not supported — use Chrome. Type your query below.")
       setOpen(true)
-      setState('IDLE')
+      setState('ERROR')
       return
     }
+    try{
+      // Try to get mic for waveform volume
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({audio:true})
+        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+        const src = ctx.createMediaStreamSource(stream)
+        const analyser = ctx.createAnalyser()
+        analyser.fftSize = 256
+        src.connect(analyser)
+        audioContextRef.current = ctx
+        analyserRef.current = analyser
+      }catch{}
+    }catch{}
+
     const rec = new SR()
     rec.lang = 'en-IN'
-    rec.interimResults = false
-    rec.maxAlternatives = 1
+    rec.interimResults = true
     rec.continuous = false
-    rec.onstart=()=>{
-      setState('LISTENING'); setResponse(null); setError(""); setTranscript("")
-    }
+    rec.maxAlternatives = 1
+    rec.onstart=()=>{ setState('LISTENING'); setResponse(null); setTranscript(""); setInterim("")}
     rec.onresult=(e:any)=>{
-      const txt = e.results[0][0].transcript as string
-      setTranscript(txt)
-      setState('PROCESSING')
-      handleQuery(txt)
+      let interimText=""
+      let finalText=""
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const r=e.results[i]
+        if(r.isFinal) finalText+=r[0].transcript
+        else interimText+=r[0].transcript
+      }
+      if(interimText) setInterim(interimText)
+      if(finalText){
+        setTranscript(finalText)
+        setInterim("")
+        setState('PROCESSING')
+        handleQuery(finalText)
+      }
     }
     rec.onerror=(e:any)=>{
-      setError(e.error==='not-allowed' ? "Microphone access is required for voice input." : "I couldn't understand that. Please try again.")
+      if(e.error==='not-allowed') setError("Microphone access is required for voice input.")
+      else if(e.error==='no-speech') setError("I couldn't understand that. Please try again.")
+      else setError(e.error || "Voice temporarily unavailable.")
       setState('ERROR')
-      setTimeout(()=> setState('IDLE'), 2200)
     }
     rec.onend=()=>{
       if(state==='LISTENING') setState('IDLE')
+      try{ audioContextRef.current?.close() }catch{}
+      audioContextRef.current=null
+      analyserRef.current=null
     }
     recRef.current=rec
-    try{ rec.start(); setOpen(true) }catch{ setState('ERROR')}
+    try{ rec.start(); setOpen(true); }catch(e:any){ setError(e.message); setState('ERROR')}
+    setOpen(true)
   }
-
   const stopListening=()=>{
     try{ recRef.current?.stop()}catch{}
-    if(state==='LISTENING') setState('IDLE')
+    setState('IDLE')
+    try{ audioContextRef.current?.close()}catch{}
   }
-
   const stopSpeaking=()=>{
     speechSynthesis.cancel()
     setState('IDLE')
@@ -137,182 +166,151 @@ export default function VoiceAssistant({ inline=false }:{inline?:boolean}){
 
   const handleQuery=async(q:string)=>{
     const token=localStorage.getItem('token')
-    if(!token){
-      const r={intent:'AUTH', response:'Please login as officer to use voice intelligence.'}
-      setResponse(r as any); setState('SPEAKING'); speak(r.response); return
-    }
+    if(!token){ setResponse({intent:'AUTH', response:'Please login as officer to use BHOOMI Intelligence.'}); speak('Please login as officer to use BHOOMI Intelligence.'); setState('SPEAKING'); return }
     setState('PROCESSING')
     try{
-      const r = await fetch('/api/voice/query', {
-        method:'POST',
-        headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`},
-        body: JSON.stringify({query:q, language:'en-IN', context:{project_id: currentProjectId, current_route: loc.pathname}})
-      })
+      const context = { project_id: projectIdFromRoute(), current_route: loc.pathname }
+      const r = await fetch('/api/voice/query', {method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body: JSON.stringify({query:q, language:'en-IN', context})})
       const j = await r.json()
       if(!j.success) throw new Error(j.error?.message||'Voice intelligence is temporarily unavailable.')
       const data:VoiceResp=j.data
       setResponse(data)
-      setState('SPEAKING')
-      speak(data.response)
-      // audit log is server side; navigation after short delay so user hears start
-      const route = (data as any).navigation || (data as any).route
-      if(route){
-        let target=route
-        const filters=(data as any).filters
-        if(filters && Object.keys(filters).length){
+      // speak concise response (1-4 sentences, already concise from backend)
+      if(data.speak!==false) speak(data.response)
+      else setState('IDLE')
+      if(data.route){
+        let target=data.route
+        if(data.filters){
           const qs=new URLSearchParams()
-          Object.entries(filters).forEach(([k,v])=> qs.set(k, String(v)))
+          Object.entries(data.filters).forEach(([k,v])=> { if(v) qs.set(k, String(v))})
           if(qs.toString()) target+=`?${qs.toString()}`
         }
-        // Close overlay so map/content is not stuck under backdrop — keep speaking
-        setTimeout(()=>{ setOpen(false); nav(target); // allow Leaflet to measure container after navigation
-          setTimeout(()=> { window.dispatchEvent(new Event('resize')); }, 320)
-        }, 800)
+        setTimeout(()=> nav(target), 850)
       } else {
-        // No navigation — keep overlay open for reading, auto-close after 4s if speaking done
-        setTimeout(()=>{ if(state!=='LISTENING') setOpen(false)}, 4200)
+        setState('SPEAKING')
       }
     }catch(e:any){
       setError(e.message || "Voice intelligence is temporarily unavailable.")
+      setResponse({intent:'ERROR', response: e.message})
       setState('ERROR')
-      speak(e.message)
-      setTimeout(()=> setState('IDLE'), 1800)
+      // fallback to text display
     }
   }
 
   const speak=(text:string)=>{
     if(!text) return
-    speechSynthesis.cancel()
-    const u = new SpeechSynthesisUtterance(text)
-    const v=selectDeepVoice()
-    if(v) u.voice=v
+    const clean = text.replace(/\s+/g,' ').trim()
+    // Respect Barge-in: if user starts speaking, this will be cancelled via startListening
+    const u = new SpeechSynthesisUtterance(clean)
+    const voice = selectDeepVoice()
+    if(voice) u.voice = voice
     u.lang='en-IN'
-    u.rate=0.92
-    u.pitch=0.72
-    u.volume=1.0
+    u.rate=0.92 // moderate, commanding
+    u.pitch=0.85 // low, deep
+    u.volume=0.95
     u.onstart=()=> setState('SPEAKING')
     u.onend=()=> setState('IDLE')
-    u.onerror=()=> setState('IDLE')
+    u.onerror=()=> setState('ERROR')
+    speechSynthesis.cancel()
     speechSynthesis.speak(u)
   }
 
   const handleTyped=(q:string)=>{
     if(!q.trim()) return
     setTranscript(q)
+    setState('PROCESSING')
     handleQuery(q)
   }
 
-  // inline variant for project detail "Generate Voice Briefing" style (not altering dashboard)
+  // Keyboard activation
+  useEffect(()=>{
+    const h=(e:KeyboardEvent)=>{
+      if((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); startListening() }
+      if(e.key==='Escape' && open){ setOpen(false); stopSpeaking(); stopListening()}
+    }
+    window.addEventListener('keydown', h)
+    return ()=> window.removeEventListener('keydown', h)
+  },[open, state])
+
   if(inline){
-    return <div className="card" style={{display:'flex',gap:8,alignItems:'center'}}>
-      <button className="btn saffron" onClick={startListening} style={{display:'flex',gap:6,alignItems:'center'}}><Mic size={16}/> Voice Intelligence</button>
-      <span style={{fontSize:11,color:'#64748b'}}>Ask: “Show critical projects” • “Why is this project high risk?” • “Open simulator”</span>
+    return <div className="card" style={{display:'flex',gap:8,alignItems:'center',border:'1px solid #e2e8f0'}}>
+      <button className="btn saffron" onClick={startListening} style={{display:'flex',gap:6,alignItems:'center'}} aria-label="Voice Intelligence"><Mic size={16}/> BHOOMI Intelligence</button>
+      <span style={{fontSize:11,color:'#64748b'}}>Ask: “Show critical projects” “Why is this project high risk?”</span>
     </div>
   }
 
   return <>
-    {/* Persistent circular mic — bottom-right, premium glass/dark navy, animated ring */}
-    <button
-      onClick={state==='SPEAKING' ? stopSpeaking : startListening}
-      onKeyDown={e=>{ if(e.key==='Enter' || e.key===' ') { e.preventDefault(); startListening() } }}
-      aria-label="Voice Intelligence — Ask BHOOMI"
-      title="Voice Intelligence — Ask BHOOMI (Enter to activate)"
-      style={{
-        position:'fixed',bottom:18,right:18,width:58,height:58,borderRadius:999,
-        background: state==='LISTENING' ? '#dc2626' : state==='SPEAKING' ? '#0a1930' : '#0a1930',
-        color:'#fff',border:'2px solid rgba(255,255,255,0.16)',boxShadow:'0 10px 28px rgba(2,12,28,0.35), 0 0 0 1px rgba(255,107,53,0.18)',
-        display:'grid',placeItems:'center',zIndex:55,cursor:'pointer',transition:'transform 0.16s',
-      }}
-    >
-      {/* subtle animated ring */}
-      <span style={{
-        position:'absolute',inset:-6,borderRadius:999,border:`1px solid ${state==='LISTENING' ? 'rgba(220,38,38,0.35)' : state==='SPEAKING' ? 'rgba(56,189,248,0.28)' : 'rgba(255,107,53,0.22)'}`,
-        animation: state==='IDLE' ? 'pulse 2.6s infinite' : state!=='ERROR' ? 'pulse 1.1s infinite' : undefined
-      }}/>
-      {state==='LISTENING' ? <Mic size={22}/> : state==='SPEAKING' ? <Volume2 size={22}/> : state==='PROCESSING' ? <Sparkles size={20}/> : <Mic size={20}/>}
+    {/* Persistent premium button */}
+    <button onClick={startListening} aria-label="Voice Intelligence — BHOOMI" title="BHOOMI Intelligence — Ctrl+K"
+      style={{position:'fixed',bottom:18,right:18,width:62,height:62,borderRadius:999,background: state==='LISTENING' ? '#dc2626' : 'radial-gradient(120% 120% at 30% 20%, #1e3a5f 0%, #0a1930 60%)',color:'#fff',border:'1px solid rgba(255,255,255,0.12)',boxShadow:'0 10px 28px rgba(10,25,48,0.35), 0 0 0 1px rgba(255,255,255,0.06) inset',display:'grid',placeItems:'center',zIndex:50, cursor:'pointer', transition:'transform 0.15s'}}>
+      <span style={{position:'absolute',inset:-6,borderRadius:999,border:'1px solid rgba(255,107,53,0.25)', opacity: state==='LISTENING' || state==='SPEAKING' ? 1 : 0, animation: state==='LISTENING' ? 'voicePulse 1.6s infinite' : state==='SPEAKING' ? 'voicePulse 1.2s infinite' : undefined}}/>
+      <Mic size={24} style={{filter: state==='LISTENING' ? 'drop-shadow(0 0 6px rgba(255,255,255,0.6))' : undefined}}/>
+      <span style={{position:'absolute',bottom:-8,background:'#0a1930',color:'#fff',fontSize:9,fontWeight:800,padding:'2px 6px',borderRadius:999,letterSpacing:0.6,border:'1px solid #1e3a5f'}}>VOICE</span>
     </button>
+    <style>{`@keyframes voicePulse{0%{transform:scale(1);opacity:0.7}50%{transform:scale(1.08);opacity:0.35}100%{transform:scale(1);opacity:0.7}} @keyframes scan{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}`}</style>
+    {open && <div role="dialog" aria-modal="true" aria-label="BHOOMI Intelligence Voice" style={{position:'fixed',inset:0,background:'rgba(10,25,48,0.55)',backdropFilter:'blur(6px)',zIndex:60,display:'grid',placeItems:'center',padding:16}} onClick={(e)=>{ if(e.target===e.currentTarget){ setOpen(false); stopSpeaking(); stopListening() }}}>
+      <div className="card" style={{width:'min(560px, 96vw)',padding:0,overflow:'hidden',border:'1px solid #1e3a5f',boxShadow:'0 20px 60px rgba(0,0,0,0.35)',position:'relative'}}>
+        {/* Header: BHOOMI INTELLIGENCE */}
+        <div style={{background:'linear-gradient(180deg,#0a1930 0%, #0f264a 100%)',color:'#fff',padding:'14px 16px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div style={{display:'flex',gap:10,alignItems:'center'}}>
+            <span style={{width:36,height:36,borderRadius:10,background:'#ff6b35',display:'grid',placeItems:'center',fontWeight:900}}>◉</span>
+            <div><div style={{fontWeight:900,letterSpacing:0.6,fontSize:13}}>BHOOMI INTELLIGENCE</div><div style={{fontSize:10,opacity:0.7,letterSpacing:0.4}}>NATIONAL INFRASTRUCTURE COMMAND — DEMO MODE</div></div>
+          </div>
+          <button onClick={()=>{setOpen(false); stopSpeaking(); stopListening()}} aria-label="Close" style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.12)',color:'#fff',borderRadius:999,width:30,height:30,display:'grid',placeItems:'center'}}><X size={14}/></button>
+        </div>
 
-    {open && <div style={{position:'fixed',inset:0,background:'rgba(7,16,32,0.52)',backdropFilter:'blur(8px)',zIndex:60,display:'grid',placeItems:'center',padding:16}}>
-      <div className="card" style={{
-        width:'min(560px, 96vw)',padding:18,position:'relative',
-        background:'linear-gradient(180deg, #0a1930 0%, #0f264a 100%)', color:'#e2e8f0', border:'1px solid rgba(255,255,255,0.10)',
-        boxShadow:'0 20px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06)', borderRadius:16
-      }}>
-        <button
-          onClick={()=>{setOpen(false); stopSpeaking(); stopListening(); setState('IDLE')}}
-          aria-label="Close voice"
-          style={{position:'absolute',top:10,right:10,background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:999,width:30,height:30,display:'grid',placeItems:'center',color:'#cbd5e1'}}>
-          <X size={14}/>
-        </button>
+        {/* State badge */}
+        <div style={{display:'flex',justifyContent:'center',padding:'10px 12px',gap:8,alignItems:'center',background: state==='LISTENING' ? '#fef2f2' : state==='SPEAKING' ? '#f0f4ff' : state==='PROCESSING' ? '#f8fafc' : state==='ERROR' ? '#fef2f2' : '#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
+          <span style={{width:8,height:8,borderRadius:999,background: state==='LISTENING' ? '#dc2626' : state==='SPEAKING' ? '#0a1930' : state==='PROCESSING' ? '#d97706' : state==='ERROR' ? '#dc2626' : '#94a3b8', display:'inline-block', boxShadow: state==='LISTENING' ? '0 0 8px #dc2626' : undefined}}/>
+          <span style={{fontSize:11,fontWeight:800,letterSpacing:0.6,color: state==='LISTENING' ? '#dc2626' : state==='SPEAKING' ? '#0a1930' : '#475569'}}>{state==='LISTENING' ? '● LISTENING' : state==='PROCESSING' ? '● ANALYZING REQUEST' : state==='SPEAKING' ? '● SPEAKING' : state==='ERROR' ? '● ERROR' : '● IDLE'} — BHOOMI</span>
+          {state==='SPEAKING' && <button className="btn" onClick={stopSpeaking} style={{marginLeft:8,padding:'4px 8px',fontSize:11,display:'flex',gap:4,alignItems:'center'}}><Pause size={12}/> Stop</button>}
+        </div>
 
-        <div style={{textAlign:'center'}}>
-          {/* BHOOMI INTELLIGENCE header */}
-          <div style={{fontSize:10,letterSpacing:1,opacity:0.7,fontWeight:800}}>BHOOMI INTELLIGENCE</div>
-          <div style={{fontSize:11,marginTop:2,display:'inline-flex',gap:6,alignItems:'center',padding:'4px 8px',borderRadius:999,background: state==='LISTENING' ? 'rgba(220,38,38,0.18)' : state==='PROCESSING' ? 'rgba(245,158,11,0.18)' : state==='SPEAKING' ? 'rgba(56,189,248,0.16)' : state==='ERROR' ? 'rgba(220,38,38,0.18)' : 'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.08)'}}>
-            <span style={{width:7,height:7,borderRadius:999,background: state==='LISTENING' ? '#ef4444' : state==='PROCESSING' ? '#f59e0b' : state==='SPEAKING' ? '#38bdf8' : state==='ERROR' ? '#ef4444' : '#94a3b8', boxShadow: state!=='IDLE' ? '0 0 8px currentColor' : undefined}}/>
-            {state==='LISTENING' ? '● LISTENING' : state==='PROCESSING' ? '● ANALYZING REQUEST' : state==='SPEAKING' ? '● SPEAKING' : state==='ERROR' ? '● ERROR' : '● READY'}
-            <span style={{opacity:0.7,marginLeft:4,fontSize:10}}>DEMO MODE — browser SpeechSynthesis • BHASHINI adapter</span>
+        <div style={{padding:16,display:'grid',gap:10}}>
+          {/* Waveform */}
+          <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:12,padding:'10px 8px'}}>
+            <Waveform state={state} volume={volume}/>
+            <div style={{textAlign:'center',fontSize:10,color:'#64748b',marginTop:4}}>{state==='LISTENING' ? 'How can I assist you?' : state==='PROCESSING' ? 'Querying project intelligence...' : state==='SPEAKING' ? 'BHOOMI is responding — 1–4 sentences, precise' : 'Tap mic or type — barge-in: speak while BHOOMI speaks to interrupt'}</div>
           </div>
 
-          {/* Orb + waveform */}
-          <div style={{marginTop:12,display:'grid',placeItems:'center',gap:8}}>
-            <div style={{
-              width:72,height:72,borderRadius:999,
-              background: state==='LISTENING' ? 'radial-gradient(circle at 30% 30%, #ff6b35, #7f1d1d)' : state==='SPEAKING' ? 'radial-gradient(circle at 30% 30%, #0ea5e9, #0a1930)' : 'radial-gradient(circle at 30% 30%, #1e3a5f, #0a1930)',
-              display:'grid',placeItems:'center',color:'#fff',
-              border:'1px solid rgba(255,255,255,0.14)', boxShadow: state==='LISTENING' ? '0 0 24px rgba(220,38,38,0.45)' : state==='SPEAKING' ? '0 0 22px rgba(56,189,248,0.35)' : '0 0 18px rgba(255,107,53,0.22)',
-              animation: state==='LISTENING' || state==='SPEAKING' ? 'pulse 1.2s infinite' : state==='PROCESSING' ? 'pulse 1.6s infinite' : undefined
-            }}>
-              {state==='SPEAKING' ? <Volume2 size={28}/> : state==='PROCESSING' ? <Activity size={26}/> : state==='ERROR' ? <AlertCircle size={26}/> : <Mic size={26}/>}
-            </div>
-            <Waveform active={state==='LISTENING' || state==='SPEAKING'} mode={state}/>
-            <div style={{fontSize:11,color:'#94a3b8',minHeight:16}}>
-              {state==='LISTENING' ? '"How can I assist you?"' : state==='PROCESSING' ? 'Querying project intelligence...' : state==='SPEAKING' ? 'BHOOMI Intelligence responding — calm command-center authority' : 'Tap mic and speak or type'}
-            </div>
-          </div>
+          {/* Transcript */}
+          {(transcript || interim) && <div style={{background:'#0a1930',color:'#fff',padding:10,borderRadius:10,border:'1px solid #1e3a5f'}}>
+            <div style={{fontSize:10,opacity:0.7,letterSpacing:0.6}}>YOU</div>
+            <div style={{fontSize:13,fontWeight:700,marginTop:2,lineHeight:1.4}}>"{transcript || interim}" {interim && <span style={{opacity:0.6}}>{interim}</span>}</div>
+          </div>}
 
-          {transcript && <div style={{marginTop:10,background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.08)',padding:'8px 10px',borderRadius:10,fontSize:12,color:'#e2e8f0',backdropFilter:'blur(4px)'}}>&gt; “{transcript}”</div>}
-          {state==='LISTENING' && <button className="btn" onClick={stopListening} style={{marginTop:10,background:'rgba(255,255,255,0.08)',color:'#e2e8f0',border:'1px solid rgba(255,255,255,0.12)'}}><MicOff size={14}/> Cancel</button>}
-          {state==='PROCESSING' && <div style={{marginTop:10,fontSize:11,color:'#f59e0b',display:'flex',gap:6,alignItems:'center',justifyContent:'center'}}><Sparkles size={14}/> Analyzing request — querying project intelligence...</div>}
-          {error && <div style={{marginTop:10,background:'rgba(220,38,38,0.12)',border:'1px solid rgba(220,38,38,0.22)',padding:'8px 10px',borderRadius:8,fontSize:12,color:'#fecaca'}}>{error}</div>}
+          {/* Processing shimmer */}
+          {state==='PROCESSING' && <div style={{height:2,background:'#e2e8f0',borderRadius:999,overflow:'hidden',position:'relative'}}><div style={{position:'absolute',inset:0,background:'linear-gradient(90deg, transparent, #0a1930, transparent)', animation:'scan 1s linear infinite', width:'50%'}}/></div>}
 
-          {!['LISTENING','PROCESSING'].includes(state) && response && <div style={{marginTop:12,background:'#0a1930',border:'1px solid rgba(255,255,255,0.08)',color:'#e2e8f0',padding:12,borderRadius:12,textAlign:'left',boxShadow:'inset 0 1px 0 rgba(255,255,255,0.04)'}}>
-            <div style={{fontSize:10,opacity:0.6,letterSpacing:0.6}}>{response.intent} {response.action ? `• ${response.action}` : ''}</div>
-            <div style={{fontWeight:700,marginTop:4,lineHeight:1.45, fontSize:13}}>{response.response}</div>
-            {response.navigation && <div style={{fontSize:11,opacity:0.6,marginTop:6}}>→ Navigating to {response.navigation}</div>}
-            <div style={{marginTop:8,display:'flex',gap:6}}>
-              <button className="btn" style={{background:'rgba(255,255,255,0.08)',color:'#e2e8f0',border:'1px solid rgba(255,255,255,0.12)',padding:'6px 10px',fontSize:12}} onClick={()=> response.response && (()=>{
-                const u=new SpeechSynthesisUtterance(response.response); const v=selectDeepVoice(); if(v) u.voice=v; u.lang='en-IN'; u.rate=0.92; u.pitch=0.72; speechSynthesis.cancel(); speechSynthesis.speak(u);
-              })()}><Volume2 size={14}/> Replay</button>
-              <button className="btn" style={{background:'rgba(255,255,255,0.08)',color:'#e2e8f0',border:'1px solid rgba(255,255,255,0.12)',padding:'6px 10px',fontSize:12}} onClick={stopSpeaking}><MicOff size={14}/> Stop</button>
+          {/* Response */}
+          {response && state!=='LISTENING' && <div style={{background:'#ffffff',border:'1px solid #e2e8f0',padding:12,borderRadius:10}}>
+            <div style={{fontSize:10,letterSpacing:0.6,color:'#64748b',fontWeight:800}}>{response.intent} {response.intent==='ERROR' ? '— error' : '— BHOOMI INTELLIGENCE'}</div>
+            <div style={{fontWeight:700,marginTop:4,lineHeight:1.5,fontSize:13,whiteSpace:'pre-wrap'}}>{response.response}</div>
+            {response.route && <div style={{fontSize:11,background:'#f1f5f9',padding:'6px 8px',borderRadius:8,marginTop:8}}>→ Navigating to {response.route} {response.filters && Object.keys(response.filters).length>0 ? `with ${JSON.stringify(response.filters)}` : ''}</div>}
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              <button className="btn" onClick={()=> speak(response.response)} style={{display:'flex',gap:4,alignItems:'center',fontSize:11}}><Play size={12}/> Replay</button>
+              <button className="btn" onClick={stopSpeaking} style={{fontSize:11}}><Pause size={12}/> Pause</button>
             </div>
           </div>}
 
+          {error && <div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#991b1b',padding:10,borderRadius:8,fontSize:12}}>{error} <button className="btn" onClick={startListening} style={{marginLeft:8,padding:'4px 8px',fontSize:11}}><RotateCcw size={12}/> Try Again</button></div>}
+
+          {/* Input */}
+          <div style={{display:'flex',gap:6}}>
+            <input className="input" placeholder="Type: Show critical projects" id="voice-typed" aria-label="Type voice command" onKeyDown={e=>{ if(e.key==='Enter'){ const v=(e.target as HTMLInputElement).value; if(v){ setTranscript(v); handleTyped(v)} } }} style={{flex:1}}/>
+            <button className="btn primary" onClick={()=>{ const el=document.getElementById('voice-typed') as HTMLInputElement; if(el?.value){ setTranscript(el.value); handleTyped(el.value)} }}>Ask</button>
+            {state==='LISTENING' ? <button className="btn" onClick={stopListening} style={{display:'flex',gap:4,alignItems:'center'}}><MicOff size={14}/> Cancel</button> : <button className="btn saffron" onClick={startListening} style={{display:'flex',gap:4,alignItems:'center'}}><Mic size={14}/> Speak</button>}
+          </div>
+
           {/* Suggestions */}
-          <div style={{marginTop:12,textAlign:'left'}}>
-            <div style={{fontSize:10,letterSpacing:0.6,opacity:0.6,fontWeight:800}}>TRY ASKING</div>
+          <div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:0.6,color:'#64748b'}}>TRY ASKING</div>
             <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:6}}>
-              {[
-                "Show critical projects",
-                "Why is this project high risk?",
-                "What are today's alerts?",
-                "Show grievance hotspots",
-                "Give me a project briefing",
-                "What actions do you recommend?",
-                "Open Risk Intelligence",
-                "Open What-If Simulator"
-              ].map(s=> <button key={s} onClick={()=> handleTyped(s)} style={{fontSize:11,padding:'6px 8px',borderRadius:999,background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.10)',color:'#cbd5e1'}}>{s}</button>)}
+              {SUGGESTIONS.map(s=> <button key={s} onClick={()=>{ setTranscript(s); handleTyped(s)}} style={{fontSize:11,background:'#f1f5f9',border:'1px solid #e2e8f0',padding:'6px 8px',borderRadius:999,cursor:'pointer'}}>{s}</button>)}
             </div>
           </div>
 
-          <div style={{marginTop:12,display:'flex',gap:6}}>
-            <input className="input" placeholder="Type: Show critical projects" id="voice-typed" onKeyDown={e=>{ if(e.key==='Enter'){ const v=(e.target as HTMLInputElement).value; if(v) handleTyped(v); (e.target as HTMLInputElement).value=''} }} style={{flex:1,background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.10)',color:'#e2e8f0'}}/>
-            <button className="btn" style={{background:'#ff6b35',color:'#fff',border:'none',fontWeight:800}} onClick={()=>{ const el=document.getElementById('voice-typed') as HTMLInputElement; if(el?.value) { handleTyped(el.value); el.value='' }}}>Ask</button>
-          </div>
-          <div style={{fontSize:10,color:'#64748b',marginTop:8,display:'flex',justifyContent:'space-between'}}>
-            <span>Voice: BHOOMI Intelligence — Deep mature male, calm authority • Pitch 0.72 • Rate 0.92</span>
-            <span>RBAC enforced • Audit logged</span>
-          </div>
+          <div style={{fontSize:10,color:'#64748b',textAlign:'center',borderTop:'1px solid #f1f5f9',paddingTop:8}}>Speech recognition: Demo Mode (browser) • TTS: Deep male commanding (browser fallback, BHASHINI adapter ready) • RBAC enforced • Ctrl+K to open • Esc to close • Never make voice the only way</div>
         </div>
       </div>
     </div>}
