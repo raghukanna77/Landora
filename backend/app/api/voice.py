@@ -7,7 +7,7 @@ from ..database import get_db
 from ..models.project import Project
 from ..models.grievance import Grievance
 from ..models.risk import RiskPrediction, Recommendation
-from ..auth.security import get_current_user
+from ..auth.security import get_current_user, can_access_project
 from ..models.user import User
 from ..ml.predict import predict_for_project
 from ..ml.explain import explain_project
@@ -237,7 +237,8 @@ def voice_query(req: VoiceQuery, db:Session=Depends(get_db), user:User=Depends(g
     # ——— BRIEFING ———
     if any(k in q for k in ["briefing","summarize","give me","project briefing"]):
         proj=get_project_by_query(q)
-        if proj and can_access_project(user, proj):
+        from ..auth.security import can_access_project as _can_access
+        if proj and _can_access(user, proj):
             risk=predict_for_project(proj)
             exps=explain_project(proj)
             provider = BhashiniVoiceProvider() if os.getenv("BHASHINI_API_KEY") else DemoVoiceProvider()
