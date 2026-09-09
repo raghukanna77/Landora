@@ -164,7 +164,13 @@ export default function VoiceAssistant({ inline=false }:{inline?:boolean}){
           Object.entries(filters).forEach(([k,v])=> qs.set(k, String(v)))
           if(qs.toString()) target+=`?${qs.toString()}`
         }
-        setTimeout(()=> nav(target), 900)
+        // Close overlay so map/content is not stuck under backdrop — keep speaking
+        setTimeout(()=>{ setOpen(false); nav(target); // allow Leaflet to measure container after navigation
+          setTimeout(()=> { window.dispatchEvent(new Event('resize')); }, 320)
+        }, 800)
+      } else {
+        // No navigation — keep overlay open for reading, auto-close after 4s if speaking done
+        setTimeout(()=>{ if(state!=='LISTENING') setOpen(false)}, 4200)
       }
     }catch(e:any){
       setError(e.message || "Voice intelligence is temporarily unavailable.")

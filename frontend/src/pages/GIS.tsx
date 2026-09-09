@@ -1,7 +1,21 @@
 import { useEffect, useState } from 'react'
 import { api } from '../services/api'
 import { Link } from 'react-router-dom'
-import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet'
+import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet'
+
+function MapFix(){
+  const map=useMap()
+  useEffect(()=>{
+    // Fix Leaflet stuck tiles when map was hidden (voice overlay, tab switch)
+    const id=setTimeout(()=> map.invalidateSize(), 220)
+    const onResize=()=> map.invalidateSize()
+    window.addEventListener('resize', onResize)
+    // Also re-invalidate after data loads / voice navigation
+    const t2=setTimeout(()=> map.invalidateSize(), 800)
+    return ()=>{ clearTimeout(id); clearTimeout(t2); window.removeEventListener('resize', onResize)}
+  },[map])
+  return null
+}
 
 export default function GIS(){
   const [heat,setHeat]=useState<any[]>([])
@@ -25,6 +39,7 @@ export default function GIS(){
     </div>
     <div className="card" style={{padding:0,overflow:'hidden'}}>
       <MapContainer center={[22,78]} zoom={5} style={{height:520,width:'100%'}}>
+        <MapFix/>
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
         {filtered.slice(0,400).map((h:any)=><CircleMarker key={h.project_id} center={[h.lat,h.lon]} radius={h.risk_level==='HIGH'||h.risk_level==='CRITICAL'?8:6} pathOptions={{color: h.risk_level.includes('HIGH')||h.risk_level==='CRITICAL'?'#dc2626':h.risk_level==='MEDIUM'?'#d97706':'#16a34a', fillOpacity:0.85}}>
           <Popup>

@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../services/api'
 import { Link } from 'react-router-dom'
-import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet'
+import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet'
+
+function MapFix(){ const map=useMap(); useEffect(()=>{ const id=setTimeout(()=> map.invalidateSize(), 250); const onR=()=> map.invalidateSize(); window.addEventListener('resize', onR); const t2=setTimeout(()=> map.invalidateSize(), 900); return ()=>{ clearTimeout(id); clearTimeout(t2); window.removeEventListener('resize', onR)}},[map]); return null }
 
 export default function Dashboard(){
   const [summary,setSummary]=useState<any>(null)
@@ -31,6 +33,7 @@ export default function Dashboard(){
       <div className="card" style={{height:360}}>
         <div style={{fontWeight:700,marginBottom:8}}>Risk Map — HIGH / MEDIUM / LOW</div>
         <MapContainer center={[22,78]} zoom={4.3} style={{height:310,width:'100%'}}>
+          <MapFix/>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
           {heat.slice(0,250).map((h:any)=><CircleMarker key={h.project_id} center={[h.lat,h.lon]} radius={6} pathOptions={{color: h.risk_level==='HIGH'?'#dc2626':h.risk_level==='MEDIUM'?'#d97706':'#16a34a', fillColor: h.risk_level==='HIGH'?'#dc2626':h.risk_level==='MEDIUM'?'#d97706':'#16a34a', fillOpacity:0.8}}>
             <Popup><b>{h.name}</b><br/>{h.risk_level} {(h.probability*100).toFixed(0)}% — {h.stage} <br/><Link to={`/projects/${h.project_id}`}>Open Intelligence</Link></Popup>
