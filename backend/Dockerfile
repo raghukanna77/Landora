@@ -1,10 +1,12 @@
 FROM python:3.11-slim
-# libgomp required for LightGBM + SHAP (Render python env also needs it)
+# libgomp required for LightGBM + SHAP
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements.txt .
+# Build Context is repo root (.) — see Render: Root Directory backend, Docker Build Context .
+COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-# Ensure model artifacts are present (committed for fast cold start)
+COPY backend/. ./
+COPY ml ./ml
+RUN chmod +x start.sh
 EXPOSE 8000
 CMD ["bash","start.sh"]
